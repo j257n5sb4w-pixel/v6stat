@@ -272,8 +272,10 @@ sample() {
     d6=$(echo "$out" | awk '{print $2+0}')
     read today v4 v6 cnt < "$T/totals"
     [ -z "$today" ] && today=$(date +%Y-%m-%d)
-    v4=$((v4 + d4))
-    v6=$((v6 + d6))
+    # 注意：这个 busybox ash 的整数是 32 位有符号（$((2147483647+1)) 得 -2147483648），
+    # 单日流量超过 2 GiB 就会溢出成负数，所以字节累加一律走 awk（双精度，2^53 以内精确）。
+    v4=$(awk -v a="$v4" -v b="$d4" 'BEGIN{ if (a < 0) a = 0; if (b < 0) b = 0; printf "%.0f", a+b }')
+    v6=$(awk -v a="$v6" -v b="$d6" 'BEGIN{ if (a < 0) a = 0; if (b < 0) b = 0; printf "%.0f", a+b }')
     cnt=$((cnt + 1))
 
     nd=$(date +%Y-%m-%d)
