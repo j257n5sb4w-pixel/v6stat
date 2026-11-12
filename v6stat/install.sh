@@ -2,7 +2,7 @@
 # koolshare 软件中心插件安装脚本：v6stat（IPv4/IPv6 每日流量统计）
 
 PKG=$(cd "$(dirname "$0")" && pwd)
-VER="1.3"
+VER="1.4"
 
 echo "[v6stat] 安装目录：$PKG"
 
