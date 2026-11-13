@@ -2,7 +2,7 @@
 # koolshare 软件中心插件安装脚本：v6stat（IPv4/IPv6 每日流量统计）
 
 PKG=$(cd "$(dirname "$0")" && pwd)
-VER="1.4"
+VER="1.5"
 
 echo "[v6stat] 安装目录：$PKG"
 
@@ -26,7 +26,9 @@ chmod +x /koolshare/scripts/v6stat.sh
 cat > /koolshare/init.d/V99v6stat.sh <<EOP
 #!/bin/sh
 # 开机：开启 conntrack 字节记账、补写注册信息、注册每分钟采样
+# 记账开关同时写 sysctl 与 module 参数，兼容 4.1 与 4.19+ 内核
 echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null
+echo 1 > /sys/module/nf_conntrack/parameters/acct 2>/dev/null
 dbus set softcenter_module_v6stat_name=v6stat
 dbus set softcenter_module_v6stat_title=IPv4/IPv6流量
 dbus set softcenter_module_v6stat_version=$VER
