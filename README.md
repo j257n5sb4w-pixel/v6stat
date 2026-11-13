@@ -103,15 +103,29 @@
 - 设备明细从**安装当天**开始记录，历史日期没有明细（页面上会提示）
 - 数据源最多滞后 10 分钟，页面顶部显示的是「数据时间」而不是请求时间
 - v6 隧道（6in4 / 6rd）会把同一份流量记两次
-- 双 WAN 只统计默认 WAN（`nvram get wan0_ifname` 推导，PPPoE 下是 `ppp0`）
+- 双 WAN 只统计默认 WAN（按默认路由自动识别，PPPoE 下是 `ppp0`，DHCP/静态是 `eth0` 等）
 - 极短的 UDP 流可能在两次采样之间就结束，被漏掉（conntrack 有 TIME_WAIT 缓冲，实际影响很小）
-- 仅测试于 RT-AX86U + Asuswrt-Merlin 388.11（Koolshare 改版）；理论上其它 HND 机型通用
+- 实测于 RT-AX86U + Asuswrt-Merlin 388.11（Koolshare 改版）；WAN/LAN 口、租约路径、conntrack 开关均自动探测，其它 HND 机型可直接用，换机后建议先跑 `selftest`
 
 ## 兼容性
 
-- 梅林固件（含 Koolshare 软件中心改版），需开启 JFFS 自定义脚本
-- 需要 `conntrack` 的 `acct` 支持（`/proc/sys/net/netfilter/nf_conntrack_acct`），插件会自动置 1
-- 页面依赖软件中心自带的 `state.js` / `jquery.js` / `softcenter.js`
+| 项目 | 说明 |
+| --- | --- |
+| 固件 | 梅林 / 梅林改（Koolshare、ASUSGO 软件中心），需开启 JFFS 自定义脚本 |
+| 平台 | `.valid` 为 `hnd`，覆盖 AX86U、AX88U、BE86U、BE88U 等博通 HND 机型（[平台对照表](https://www.koolcenter.com/t/topic/31603)） |
+| 接入方式 | PPPoE、DHCP、静态 IP 均可——WAN 口按默认路由自动识别 |
+| 内核 | 4.1（388）与 4.19+（3006/BE 系列）均可；`acct` 同时写 `/proc/sys/...` 与 `/sys/module/nf_conntrack/parameters/acct` |
+| 依赖 | `conntrack` 的 `acct` 支持；页面依赖软件中心自带的 `state.js` / `jquery.js` / `softcenter.js` |
+
+### 换机型后自检
+
+```sh
+/koolshare/scripts/v6stat.sh selftest
+```
+
+会逐项打印机型、内核、WAN/LAN 口、v4/v6 地址、`acct` 是否生效（看「带 bytes= 的条目」是否 > 0）、租约文件与邻居条目数量，最后跑一次真实采样。哪一项不对会直接看出来。
+
+> 若 `带 bytes= 的条目` 为 0，说明该固件内核没编译 `NF_CONNTRACK_ACCT`，此插件不适用。目前 HND 全系未发现这种情况。
 
 ## License
 
