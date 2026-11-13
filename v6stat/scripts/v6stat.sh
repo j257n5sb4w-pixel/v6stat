@@ -17,21 +17,61 @@ FLUSH_EVERY=10
 mkdir -p "$DIR" "$DEV" "$T"
 [ -f "$T/tuples" ] || : > "$T/tuples"
 
+# WAN 口不写死：PPPoE 是 ppp0，DHCP/静态是 eth0(或 2.5G 口的 eth5 等)。
+# 以默认路由为准，退化到 nvram，再退化到 ppp0。这样换机型、换接入方式都不用改脚本。
+wan_if() {
+    _d=$(ip route show default 2>/dev/null | awk '$1=="default"{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    [ -n "$_d" ] || _d=$(nvram get wan0_ifname 2>/dev/null)
+    [ -n "$_d" ] || _d=ppp0
+    echo "$_d"
+}
+
+lan_if() {
+    _l=$(nvram get lan_ifname 2>/dev/null)
+    [ -n "$_l" ] || _l=br0
+    echo "$_l"
+}
+
 lan_pfx() {
-    ip -6 addr show dev br0 scope global 2>/dev/null | awk '
+    ip -6 addr show dev "$(lan_if)" scope global 2>/dev/null | awk '
         /inet6/ { split($2, a, ":"); print a[1]":"a[2]":"a[3]":"a[4]; exit }'
 }
 
 wan6_addr() {
-    ip -6 addr show dev ppp0 scope global 2>/dev/null | awk '
+    ip -6 addr show dev "$(wan_if)" scope global 2>/dev/null | awk '
         /inet6/ { split($2, a, "/"); print a[1]; exit }'
+}
+
+# conntrack 记账开关：较新内核(3006/4.19+)只读 /proc 会失败，要走 module 参数
+acct_on() {
+    [ "$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null)" = "1" ] && return 0
+    echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null
+    [ "$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null)" = "1" ] && return 0
+    echo 1 > /sys/module/nf_conntrack/parameters/acct 2>/dev/null
+    return 0
+}
+
+# DHCP 租约文件位置随固件版本变，挨个试
+leases_file() {
+    for _f in /var/lib/misc/dnsmasq.leases /tmp/dnsmasq.leases \
+              /jffs/nvram/dnsmasq.leases /var/lib/dnsmasq/dnsmasq.leases; do
+        [ -s "$_f" ] && { echo "$_f"; return 0; }
+    done
+    echo /var/lib/misc/dnsmasq.leases
+}
+
+# 路由器 LAN 侧 IPv4：nvram 为空时直接问 br0
+lan_ipv4() {
+    _i=$(nvram get lan_ipaddr 2>/dev/null)
+    [ -n "$_i" ] || _i=$(ip -4 addr show dev "$(lan_if)" 2>/dev/null | awk '/inet /{split($2,a,"/"); print a[1]; exit}')
+    echo "$_i"
 }
 
 # 把 $T/dev.totals 渲染成 “id 族 字节 名字” 行（id 优先用 MAC）
 render_dev() {
-    ip neigh show dev br0 2>/dev/null > "$T/neigh"
-    ip -6 neigh show dev br0 2>/dev/null >> "$T/neigh"
-    awk -v leases="/var/lib/misc/dnsmasq.leases" -v neighf="$T/neigh" -v lanip="$(nvram get lan_ipaddr 2>/dev/null)" '
+    ip neigh show dev "$(lan_if)" 2>/dev/null > "$T/neigh"
+    ip -6 neigh show dev "$(lan_if)" 2>/dev/null >> "$T/neigh"
+    awk -v leases="$(leases_file)" -v neighf="$T/neigh" -v lanip="$(lan_ipv4)" '
         function clean(s) { gsub(/[,\r\n]/, " ", s); return s }
         function hex2d(s,   i, v, c) {
             v = 0
@@ -167,8 +207,7 @@ sample() {
         echo "$day" > "$T/dev.day"
     fi
 
-    [ "$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null)" = "1" ] || \
-        echo 1 > /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null
+    [ "$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null)" = "1" ] || acct_on
 
     base=0
     [ -s "$T/tuples" ] || base=1
@@ -176,7 +215,7 @@ sample() {
     [ -f "$T/dev.totals" ] || : > "$T/dev.totals"
 
     out=$(awk -v oldf="$T/tuples" -v newf="$T/tuples.new" -v base="$base" \
-              -v pfx="$(lan_pfx)" -v wan6="$(wan6_addr)" -v lanip="$(nvram get lan_ipaddr 2>/dev/null)" \
+              -v pfx="$(lan_pfx)" -v wan6="$(wan6_addr)" -v lanip="$(lan_ipv4)" \
               -v devf="$T/devdelta" '
         function priv(a) { return a ~ /^192\.168\./ || a ~ /^10\./ || a ~ /^172\.(1[6-9]|2[0-9]|3[01])\./ }
         function loc6(a) { return a ~ /^fe80:/ || a ~ /^f[cd]/ }
@@ -312,10 +351,44 @@ report() {
 }
 
 check() {
-    echo "acct=$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null)  conns=$(grep -c . /proc/net/nf_conntrack 2>/dev/null)"
+    echo "wan=$(wan_if)  lan=$(lan_if)  acct=$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null)  conns=$(grep -c . /proc/net/nf_conntrack 2>/dev/null)"
     echo "今天: $(cat "$T/totals" 2>/dev/null)"
     echo "设备累计: $(grep -c . "$T/dev.totals" 2>/dev/null) 条"
-    awk '$1=="ppp0:"{printf "netdev ppp0 rx=%.2f GB tx=%.2f GB\n", $2/1073741824, $10/1073741824}' /proc/net/dev
+    awk -v w="$(wan_if):" '$1==w{printf "netdev %s rx=%.2f GB tx=%.2f GB\n", $1, $2/1073741824, $10/1073741824}' /proc/net/dev
+}
+
+# 换机/换固件后先跑这个：把脚本依赖的每一项都点一遍，缺哪项会直接说
+selftest() {
+    echo "== 机型 =="
+    echo "  productid=$(nvram get productid)  buildno=$(nvram get buildno)  $(uname -m)"
+    echo "  内核: $(uname -r)"
+    echo "== 接口 =="
+    echo "  wan=$(wan_if)  lan=$(lan_if)"
+    echo "  wan v4: $(ip -4 addr show dev "$(wan_if)" 2>/dev/null | awk '/inet /{print $2; exit}')"
+    echo "  wan v6: $(ip -6 addr show dev "$(wan_if)" scope global 2>/dev/null | awk '/inet6/{print $2; exit}')"
+    echo "  lan v6 前缀: $(lan_pfx)"
+    echo "== conntrack =="
+    acct_on
+    echo "  acct=$(cat /proc/sys/net/netfilter/nf_conntrack_acct 2>/dev/null) (要 1)"
+    echo "  条目数=$(grep -c . /proc/net/nf_conntrack 2>/dev/null) (要 >0)"
+    echo "  带 bytes= 的条目=$(awk '/bytes=/{c++} END{print c+0}' /proc/net/nf_conntrack 2>/dev/null) (要 >0，否则记账没生效)"
+    echo "== 设备名来源 =="
+    echo "  租约文件=$(leases_file)  行数=$(grep -c . "$(leases_file)" 2>/dev/null)"
+    echo "  邻居条目=$(ip neigh show dev "$(lan_if)" 2>/dev/null | grep -c .) + $(ip -6 neigh show dev "$(lan_if)" 2>/dev/null | grep -c .)"
+    echo "== 软件中心 =="
+    # 这台 busybox 没有 command 内建，直接跑一次看退出码
+    _db=no; _cr=no
+    dbus get softcenter_module_v6stat_name >/dev/null 2>&1 && _db=ok
+    cru l >/dev/null 2>&1 && _cr=ok
+    echo "  dbus=$_db  cru=$_cr"
+    echo "  jffs 剩余=$(df -k /jffs 2>/dev/null | awk 'NR==2{printf "%.1f MB", $4/1024}')"
+    echo "== 测一次采样 =="
+    _b=$(cat "$T/totals" 2>/dev/null)
+    sample >/dev/null 2>&1
+    _a=$(cat "$T/totals" 2>/dev/null)
+    echo "  采样前: $_b"
+    echo "  采样后: $_a"
+    echo "  设备明细: $(wc -l < "$T/devout" 2>/dev/null || echo 0) 行"
 }
 
 reset() {
@@ -329,6 +402,7 @@ case "$1" in
     boot)   boot ;;
     report) report ;;
     check)  check ;;
+    selftest) selftest ;;
     reset)  reset ;;
-    *) echo "用法: $0 sample|boot|report|check|reset" ;;
+    *) echo "用法: $0 sample|boot|report|check|selftest|reset" ;;
 esac
